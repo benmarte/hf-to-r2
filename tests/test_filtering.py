@@ -73,6 +73,11 @@ def test_all_flag_uploads_everything(run_main):
     assert strip_prefix(uploaded) == set(REPO_FILES)
 
 
+def test_all_wins_over_include(run_main):
+    uploaded, _ = run_main("--all", "--include", "*.json")
+    assert strip_prefix(uploaded) == set(REPO_FILES)
+
+
 def test_include_overrides_defaults(run_main):
     uploaded, _ = run_main("--include", "*.json")
     assert strip_prefix(uploaded) == {"config.json", "tokenizer.json",

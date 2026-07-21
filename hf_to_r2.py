@@ -8,6 +8,7 @@ Usage (called by zsh function, not directly):
 """
 
 import argparse
+import fnmatch
 import os
 import sys
 import threading
@@ -222,10 +223,9 @@ def stream_to_r2(client, hf_url, r2_key, filename, token=None):
 
 
 def match_patterns(filename, patterns):
-    """Simple glob-style pattern matching."""
+    """Simple glob-style pattern matching; empty patterns match everything."""
     if not patterns:
         return True
-    import fnmatch
     return any(fnmatch.fnmatch(filename, p) for p in patterns)
 
 
@@ -277,13 +277,12 @@ def main():
         err(f"Could not list repo files: {e}")
 
     # Filter by include/exclude patterns
-    import fnmatch
     filtered = []
     for f in files:
         fname = os.path.basename(f)
-        if args.include and not any(fnmatch.fnmatch(fname, p) for p in args.include):
+        if not match_patterns(fname, args.include):
             continue
-        if args.exclude and any(fnmatch.fnmatch(fname, p) for p in args.exclude):
+        if args.exclude and match_patterns(fname, args.exclude):
             continue
         filtered.append(f)
 
