@@ -124,12 +124,15 @@ export R2_UPLOAD_WORKERS=8   # default is 4
 ### Basic
 
 ```bash
-# upload all files in a repo
+# upload model weights + config (default patterns: *.gguf *.safetensors config.json tokenizer*)
 hf-to-r2 Qwen/Qwen3-32B
 
 # full HuggingFace URLs work too — just paste from your browser
 hf-to-r2 https://huggingface.co/Qwen/Qwen3-32B
 hf-to-r2 https://huggingface.co/Qwen/Qwen3-32B/tree/main
+
+# upload every file in the repo (README, images, etc.)
+hf-to-r2 Qwen/Qwen3-32B --all
 
 # upload safetensors + config files only (recommended for model backups)
 hf-to-r2 Qwen/Qwen3-32B --safetensors
@@ -138,7 +141,7 @@ hf-to-r2 Qwen/Qwen3-32B --safetensors
 ### Filter files
 
 ```bash
-# include specific patterns
+# override the default include patterns
 hf-to-r2 Qwen/Qwen3-32B --include "*.safetensors" "config.json" "tokenizer*"
 
 # exclude patterns
@@ -191,6 +194,8 @@ hf-r2-ls models/Qwen--Qwen3-32B/
 5. Nothing is written to local disk
 
 Files already present in R2 are skipped automatically, so re-running the command is safe and acts as a resume.
+
+If a download connection drops mid-file, the transfer auto-resumes: it reconnects with an HTTP `Range` request starting at the last byte already committed to R2 and continues the same multipart upload — no re-downloading of completed parts. It retries up to 8 times with exponential backoff (2s → 60s), and the retry budget resets whenever progress is made. Tune with `HF_DOWNLOAD_RETRIES`.
 
 ---
 

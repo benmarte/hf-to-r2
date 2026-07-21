@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
@@ -27,6 +28,10 @@ R2_BUCKET      = os.environ.get("R2_BUCKET")
 HF_TOKEN       = os.environ.get("HF_TOKEN")          # optional, needed for gated models
 CHUNK_SIZE     = 8 * 1024 * 1024                      # 8 MB chunks for multipart
 MAX_WORKERS    = int(os.environ.get("R2_UPLOAD_WORKERS", "4"))
+MAX_RETRIES    = int(os.environ.get("HF_DOWNLOAD_RETRIES", "8"))
+RETRY_BACKOFF  = 2                                    # seconds, doubles per attempt (capped at 60s)
+
+DEFAULT_INCLUDE = ["*.gguf", "*.safetensors", "config.json", "tokenizer*"]
 
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
@@ -108,81 +113,112 @@ def file_exists_in_r2(client, key):
 
 
 def stream_to_r2(client, hf_url, r2_key, filename, token=None):
-    """Stream a single file from HF directly to R2 via multipart upload."""
-    headers = build_hf_headers(token=token) if token else {}
+    """Stream a single file from HF directly to R2 via multipart upload.
 
-    with requests.get(hf_url, headers=headers, stream=True, timeout=30) as resp:
-        resp.raise_for_status()
-        total_size = int(resp.headers.get("content-length", 0))
-        content_type = resp.headers.get("content-type", "application/octet-stream")
+    If the download connection drops, reconnects with an HTTP Range request
+    starting at the last byte already committed to R2, so the multipart
+    upload resumes instead of starting over.
+    """
+    base_headers = build_hf_headers(token=token) if token else {}
 
-        # Use multipart upload — required for files > 5 GB, better for all large files
-        mpu = client.create_multipart_upload(
+    upload_id = None
+    parts = []
+    part_num = 0
+    committed = 0        # bytes safely uploaded to R2 as completed parts
+    total_size = 0
+    attempt = 0
+
+    def upload_part(body):
+        nonlocal part_num, committed
+        part_num += 1
+        part = client.upload_part(
             Bucket=R2_BUCKET,
             Key=r2_key,
-            ContentType=content_type,
+            UploadId=upload_id,
+            PartNumber=part_num,
+            Body=body,
         )
-        upload_id = mpu["UploadId"]
-        parts = []
-        part_num = 0
-        uploaded = 0
-        buffer = b""
+        parts.append({"PartNumber": part_num, "ETag": part["ETag"]})
+        committed += len(body)
 
-        try:
-            for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
-                buffer += chunk
-                uploaded += len(chunk)
+    try:
+        while True:
+            headers = dict(base_headers)
+            if committed:
+                headers["Range"] = f"bytes={committed}-"
+            try:
+                with requests.get(hf_url, headers=headers, stream=True, timeout=(30, 60)) as resp:
+                    resp.raise_for_status()
+                    if committed and resp.status_code != 206:
+                        # Server ignored the Range header — a full-body retry would
+                        # corrupt the upload, so bail out.
+                        raise RuntimeError("server does not support resume (no partial content)")
+                    if not total_size:
+                        total_size = int(resp.headers.get("content-length", 0))
 
-                # Upload when buffer hits chunk size
-                if len(buffer) >= CHUNK_SIZE:
-                    part_num += 1
-                    part = client.upload_part(
+                    # Use multipart upload — required for files > 5 GB, better for all large files
+                    if upload_id is None:
+                        mpu = client.create_multipart_upload(
+                            Bucket=R2_BUCKET,
+                            Key=r2_key,
+                            ContentType=resp.headers.get("content-type", "application/octet-stream"),
+                        )
+                        upload_id = mpu["UploadId"]
+
+                    buffer = b""
+                    for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
+                        buffer += chunk
+
+                        # Upload when buffer hits chunk size
+                        if len(buffer) >= CHUNK_SIZE:
+                            upload_part(buffer)
+                            buffer = b""
+                            attempt = 0  # progress made — reset the retry budget
+
+                            if total_size:
+                                pct = (committed / total_size) * 100
+                                mb = committed / 1024 / 1024
+                                total_mb = total_size / 1024 / 1024
+                                print(f"\r  {DIM}↑ {filename}: {mb:.0f} / {total_mb:.0f} MB ({pct:.1f}%){RESET}",
+                                      end="", flush=True)
+
+                    # Upload remaining buffer as final part
+                    if buffer:
+                        upload_part(buffer)
+
+                    # Complete the multipart upload
+                    client.complete_multipart_upload(
                         Bucket=R2_BUCKET,
                         Key=r2_key,
                         UploadId=upload_id,
-                        PartNumber=part_num,
-                        Body=buffer,
+                        MultipartUpload={"Parts": parts},
                     )
-                    parts.append({"PartNumber": part_num, "ETag": part["ETag"]})
-                    buffer = b""
+                    print()  # newline after progress
+                    return True
 
-                    if total_size:
-                        pct = (uploaded / total_size) * 100
-                        mb = uploaded / 1024 / 1024
-                        total_mb = total_size / 1024 / 1024
-                        print(f"\r  {DIM}↑ {filename}: {mb:.0f} / {total_mb:.0f} MB ({pct:.1f}%){RESET}",
-                              end="", flush=True)
+            except requests.exceptions.RequestException as e:
+                attempt += 1
+                if attempt > MAX_RETRIES:
+                    raise
+                wait = min(RETRY_BACKOFF * (2 ** (attempt - 1)), 60)
+                print()  # move off the progress line
+                warn(f"{filename}: connection lost ({type(e).__name__}), "
+                     f"retry {attempt}/{MAX_RETRIES} in {wait}s "
+                     f"(resuming at {committed / 1024 / 1024:.0f} MB)")
+                time.sleep(wait)
 
-            # Upload remaining buffer as final part
-            if buffer:
-                part_num += 1
-                part = client.upload_part(
+    except Exception as e:
+        # Abort the multipart upload on failure to avoid orphaned parts
+        if upload_id is not None:
+            try:
+                client.abort_multipart_upload(
                     Bucket=R2_BUCKET,
                     Key=r2_key,
                     UploadId=upload_id,
-                    PartNumber=part_num,
-                    Body=buffer,
                 )
-                parts.append({"PartNumber": part_num, "ETag": part["ETag"]})
-
-            # Complete the multipart upload
-            client.complete_multipart_upload(
-                Bucket=R2_BUCKET,
-                Key=r2_key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
-            )
-            print()  # newline after progress
-            return True
-
-        except Exception as e:
-            # Abort the multipart upload on failure to avoid orphaned parts
-            client.abort_multipart_upload(
-                Bucket=R2_BUCKET,
-                Key=r2_key,
-                UploadId=upload_id,
-            )
-            raise e
+            except Exception:
+                pass
+        raise e
 
 
 def match_patterns(filename, patterns):
@@ -196,8 +232,10 @@ def match_patterns(filename, patterns):
 def main():
     parser = argparse.ArgumentParser(description="Stream HF model files to Cloudflare R2")
     parser.add_argument("repo_id", help="HuggingFace repo ID or URL (e.g. Qwen/Qwen3-32B or https://huggingface.co/Qwen/Qwen3-32B)")
-    parser.add_argument("--include", nargs="*", default=[], metavar="PATTERN",
-                        help="Glob patterns to include (e.g. '*.safetensors' 'config.json')")
+    parser.add_argument("--include", nargs="*", default=None, metavar="PATTERN",
+                        help=f"Glob patterns to include (default: {' '.join(DEFAULT_INCLUDE)})")
+    parser.add_argument("--all", action="store_true",
+                        help="Upload every file in the repo (ignore the default include patterns)")
     parser.add_argument("--exclude", nargs="*", default=[], metavar="PATTERN",
                         help="Glob patterns to exclude")
     parser.add_argument("--prefix", default="", metavar="PREFIX",
@@ -211,6 +249,11 @@ def main():
 
     args.repo_id, args.repo_type = normalize_repo_id(args.repo_id, args.repo_type)
 
+    if args.all:
+        args.include = []
+    elif args.include is None:
+        args.include = DEFAULT_INCLUDE
+
     validate_env()
 
     # Determine R2 prefix
@@ -222,8 +265,7 @@ def main():
     info(f"bucket   : {R2_BUCKET}")
     info(f"prefix   : {prefix}")
     info(f"workers  : {args.workers}")
-    if args.include:
-        info(f"include  : {args.include}")
+    info(f"include  : {args.include if args.include else 'all files'}")
     print()
 
     # List files in the HF repo

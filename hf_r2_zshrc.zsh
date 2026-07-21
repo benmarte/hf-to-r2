@@ -17,19 +17,23 @@ alias python3-hf="$HF_TO_R2_PYTHON"
 
 # ── hf-to-r2: stream HuggingFace model files directly to Cloudflare R2 ───────
 # Usage:
-#   hf-to-r2 Qwen/Qwen3-32B                              # all files
+#   hf-to-r2 Qwen/Qwen3-32B                              # default: *.gguf *.safetensors config.json tokenizer*
 #   hf-to-r2 https://huggingface.co/Qwen/Qwen3-32B       # full URLs work too
+#   hf-to-r2 Qwen/Qwen3-32B --all                        # every file in the repo
 #   hf-to-r2 Qwen/Qwen3-32B --safetensors                # safetensors only
 #   hf-to-r2 Qwen/Qwen3-32B --include "*.safetensors" "config.json"
 #   hf-to-r2 Qwen/Qwen3-32B --prefix "backups/my-models/"
 #   hf-to-r2 Qwen/Qwen3-32B --workers 8
 function hf-to-r2() {
   if [[ $# -eq 0 ]]; then
-    echo "Usage: hf-to-r2 <repo_id_or_url> [--safetensors] [--include PATTERN...] [--prefix PREFIX] [--workers N]"
+    echo "Usage: hf-to-r2 <repo_id_or_url> [--all] [--safetensors] [--include PATTERN...] [--prefix PREFIX] [--workers N]"
+    echo ""
+    echo "Default include patterns: *.gguf *.safetensors config.json tokenizer*"
     echo ""
     echo "Examples:"
     echo "  hf-to-r2 Qwen/Qwen3-32B"
     echo "  hf-to-r2 https://huggingface.co/Qwen/Qwen3-32B"
+    echo "  hf-to-r2 Qwen/Qwen3-32B --all"
     echo "  hf-to-r2 Qwen/Qwen3-32B --safetensors"
     echo "  hf-to-r2 mistralai/Mistral-7B-v0.1 --include '*.safetensors' 'config.json' 'tokenizer*'"
     echo "  hf-to-r2 Qwen/Qwen3-32B --prefix 'backups/qwen/'"
