@@ -77,7 +77,8 @@ function hf-to-r2() {
 function hf-r2-ls() {
   local prefix="${1:-models/}"
   local py="${HF_TO_R2_PYTHON:-$HOME/.venvs/hf-to-r2/bin/python3}"
-  "$py" - <<EOF
+  # Quoted heredoc: the prefix is passed via env, never expanded into the code.
+  HF_R2_LS_PREFIX="$prefix" "$py" - <<'EOF'
 import boto3, os
 from botocore.config import Config
 client = boto3.client(
@@ -91,7 +92,7 @@ client = boto3.client(
 paginator = client.get_paginator("list_objects_v2")
 total_size = 0
 count = 0
-for page in paginator.paginate(Bucket=os.environ["R2_BUCKET"], Prefix="$prefix"):
+for page in paginator.paginate(Bucket=os.environ["R2_BUCKET"], Prefix=os.environ.get("HF_R2_LS_PREFIX", "models/")):
     for obj in page.get("Contents", []):
         size_gb = obj["Size"] / 1024**3
         print(f"  {size_gb:6.2f} GB  {obj['Key']}")

@@ -198,6 +198,11 @@ def stream_to_r2(client, hf_url, r2_key, filename, token=None):
                     return True
 
             except requests.exceptions.RequestException as e:
+                # 4xx errors (bad token, gated model, not found) won't heal on
+                # retry — fail fast. 429 (rate limit) is the retryable exception.
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status is not None and 400 <= status < 500 and status != 429:
+                    raise
                 attempt += 1
                 if attempt > MAX_RETRIES:
                     raise
@@ -219,7 +224,7 @@ def stream_to_r2(client, hf_url, r2_key, filename, token=None):
                 )
             except Exception:
                 pass
-        raise e
+        raise
 
 
 def match_patterns(filename, patterns):
@@ -282,6 +287,8 @@ def main():
         fname = os.path.basename(f)
         if not match_patterns(fname, args.include):
             continue
+        # The args.exclude guard is load-bearing: match_patterns([], ...) returns
+        # True ("match all"), which would exclude everything when no --exclude given.
         if args.exclude and match_patterns(fname, args.exclude):
             continue
         filtered.append(f)

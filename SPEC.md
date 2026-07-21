@@ -77,7 +77,7 @@ hf-2-r2/
 
 ### CI
 - [ ] GitHub Actions runs pytest on every push and PR to main
-- [ ] Matrix: Python 3.11, 3.12, 3.13
+- [ ] Matrix: Python 3.11, 3.12, 3.13, 3.14
 - [ ] Suite passes locally and in CI
 
 ## Code style

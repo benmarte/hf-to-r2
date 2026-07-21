@@ -73,6 +73,41 @@ def test_resume_without_range_support_aborts(stream, fake_hf, fake_r2):
     assert client.aborted and not client.completed
 
 
+def test_http_4xx_fails_fast_without_burning_retries(stream, fake_hf, fake_r2):
+    # 403 on a gated model won't heal on retry — must fail on the first attempt
+    # instead of grinding through the whole backoff schedule.
+    hf, client = fake_hf(DATA, http_status=403), fake_r2()
+    with pytest.raises(requests.exceptions.HTTPError):
+        stream(hf, client)
+    assert len(hf.request_offsets) == 1
+    assert client.uploads_created == 0  # failed before any multipart upload existed
+
+
+def test_http_429_rate_limit_is_retried(stream, fake_hf, fake_r2):
+    hf, client = fake_hf(DATA, http_status=429), fake_r2()
+    with pytest.raises(requests.exceptions.HTTPError):
+        stream(hf, client)
+    assert len(hf.request_offsets) == 4  # initial attempt + MAX_RETRIES
+
+
+def test_upload_part_failure_aborts_and_raises(stream, fake_hf, fake_r2):
+    # An R2-side error mid-upload must abort the multipart upload (no orphaned
+    # parts accruing storage) and propagate the original exception.
+    hf, client = fake_hf(DATA), fake_r2(fail_upload_part_at=3)
+    with pytest.raises(client.exceptions.ClientError):
+        stream(hf, client)
+    assert client.aborted and not client.completed
+
+
+def test_abort_failure_does_not_mask_original_error(stream, fake_hf, fake_r2):
+    # If the abort call itself fails, the caller must still see the original
+    # download error, not the abort error.
+    hf, client = fake_hf(DATA, fail_after=[500] * 20), fake_r2(abort_raises=True)
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
+        stream(hf, client)
+    assert client.aborted
+
+
 def test_connection_refused_leaves_no_orphaned_upload(stream, fake_hf, fake_r2):
     # requests.get itself fails: no multipart upload was ever created,
     # so there must be nothing to abort (and no orphaned parts in R2).
