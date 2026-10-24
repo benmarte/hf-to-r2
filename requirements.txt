@@ -1,3 +1,6 @@
 boto3>=1.34
 huggingface_hub>=0.23
 requests>=2.31
+# Security floor for a transitive dependency of requests: certifi < 2026.10.19
+# bundles compromised emSign root CAs (GHSA-6q48-6c7w-9gw2).
+certifi>=2026.10.19
